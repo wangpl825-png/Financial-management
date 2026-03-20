@@ -26,7 +26,7 @@ except Exception as e:
     st.error(f"讀取資料庫失敗，請確認 Google Sheets 設定與 Secrets 是否正確。錯誤訊息: {e}")
     st.stop()
 
-# 確保空表單時擁有正確的欄位
+# 確保空表單時擁有正確的欄位 (包含備註)
 if df_banks.empty: 
     df_banks = pd.DataFrame(columns=['銀行名稱', '餘額', '更新日期', '備註'])
 elif '備註' not in df_banks.columns:
@@ -37,7 +37,8 @@ if df_stocks.empty:
 elif '備註' not in df_stocks.columns:
     df_stocks['備註'] = ""
 
-if df_expenses.empty: df_expenses = pd.DataFrame(columns=['日期', '類別', '項目', '金額'])
+if df_expenses.empty: 
+    df_expenses = pd.DataFrame(columns=['日期', '類別', '項目', '金額'])
 
 # --- 2. 預先計算總資產與獲取即時股價 ---
 total_bank = df_banks['餘額'].sum() if not df_banks.empty else 0
@@ -47,8 +48,14 @@ stock_details = []
 if not df_stocks.empty:
     for index, row in df_stocks.iterrows():
         market = row['市場']
-        # 1. 加上 .strip()，把代號前後不小心多打的空白鍵刪除
-        ticker = str(row['代號']).strip() 
+        
+        # 1. 讀取代號並清理格式 (處理 Pandas 將數字加上 .0 的問題)
+        raw_ticker = str(row['代號']).strip()
+        if raw_ticker.endswith(".0"):
+            ticker = raw_ticker[:-2] # 把最後的 .0 刪掉
+        else:
+            ticker = raw_ticker
+            
         shares = float(row['股數'])
         cost = float(row['平均成本'])
         note = row.get('備註', '') 
@@ -64,19 +71,18 @@ if not df_stocks.empty:
 
             fetch_success = False
             for yf_t in yf_tickers_to_try:
-                # 為了避免 yfinance 殘留快取，加入 headers 模擬正常瀏覽器請求 (非必須但能提高成功率)
+                # 抓取近 5 天資料確保能避開假日
                 stock_info = yf.Ticker(yf_t)
                 hist = stock_info.history(period="5d")
                 
                 if not hist.empty:
-                    # 確保抓下來的是純數字 (float)
                     current_price = float(hist['Close'].iloc[-1])
                     fetch_success = True
-                    break # 成功抓到資料就跳出迴圈，不再嘗試下一個後綴
+                    break # 成功抓到資料就跳出迴圈
             
             if not fetch_success:
                 current_price = cost 
-                st.toast(f"⚠️ 找不到 {ticker} 的報價，暫以成本計算。若是台股，請確認代號是否正確。")
+                st.toast(f"⚠️ 找不到 {ticker} 的報價，暫以成本計算。若是台股，請確認代號是否為上市櫃股票。")
                 
         except Exception as e:
             current_price = cost
@@ -84,32 +90,25 @@ if not df_stocks.empty:
             st.toast(f"⚠️ 讀取 {ticker} 發生連線異常。")
                 
         # --- 3. 計算成本、手續費、稅金與損益 ---
-        # 依據市場設定不同的費率
         if market == "台灣股市":
-            fee_rate = 0.001425 * 0.28
-            tax_rate = 0.003
+            fee_rate = 0.001425 * 0.28 # 台股手續費 2.8 折
+            tax_rate = 0.003           # 台股交易稅千分之三
         else:
-            # 假設美股海外券商免手續費與交易稅 (若為複委託可在此修改)
-            fee_rate = 0.0
+            fee_rate = 0.0             # 預設美股免手續費與交易稅
             tax_rate = 0.0
             
-        # 買入成本與手續費
         buy_fee = cost * shares * fee_rate
         total_cost = cost * shares + buy_fee
         
-        # 假設以目前市價賣出會產生的手續費與稅金
         sell_fee = current_price * shares * fee_rate
         sell_tax = current_price * shares * tax_rate
         
-        # 實際現值 (已扣除預估賣出成本)
         current_value = (current_price * shares) - sell_fee - sell_tax
         total_stock_value += current_value 
         
-        # 計算淨損益 (絕對值與比例)
         profit = current_value - total_cost
         profit_pct = (profit / total_cost) * 100 if total_cost > 0 else 0
         
-        # 精算損益平衡價 (賣出淨額 = 總買入成本)
         net_sell_ratio = 1 - fee_rate - tax_rate
         break_even_price = total_cost / (shares * net_sell_ratio) if shares > 0 and net_sell_ratio > 0 else cost
         
@@ -150,7 +149,6 @@ with tab_bank:
         for index, row in df_banks.iterrows():
             st.metric(label=f"🏦 {row['銀行名稱']}", value=f"NT$ {row['餘額']:,.0f}", delta=f"更新於: {row['更新日期']}", delta_color="off")
             
-            # 讀取並顯示備註 (如果有填寫的話)
             note = row.get('備註', '')
             if pd.notna(note) and str(note).strip() != "":
                 st.caption(f"📝 備註：{note}")
@@ -162,20 +160,19 @@ with tab_bank:
     with st.expander("➕ 新增/更新銀行帳戶"):
         new_bank = st.text_input("銀行名稱 (如：玉山銀行)")
         new_amount = st.number_input("目前餘額", min_value=0, step=1000)
-        # 新增備註輸入框
         new_note = st.text_input("備註 (選填，例如：薪資戶、旅遊基金)")
         
         if st.button("確認更新"):
             if new_bank in df_banks['銀行名稱'].values:
                 df_banks.loc[df_banks['銀行名稱'] == new_bank, '餘額'] = new_amount
                 df_banks.loc[df_banks['銀行名稱'] == new_bank, '更新日期'] = datetime.now().strftime("%Y-%m-%d")
-                df_banks.loc[df_banks['銀行名稱'] == new_bank, '備註'] = new_note # 更新備註
+                df_banks.loc[df_banks['銀行名稱'] == new_bank, '備註'] = new_note 
             else:
                 new_row = pd.DataFrame([{
                     '銀行名稱': new_bank, 
                     '餘額': new_amount, 
                     '更新日期': datetime.now().strftime("%Y-%m-%d"),
-                    '備註': new_note # 新增備註
+                    '備註': new_note 
                 }])
                 df_banks = pd.concat([df_banks, new_row], ignore_index=True)
             
@@ -188,12 +185,10 @@ with tab_stock:
     st.subheader("庫存持股狀況")
     if stock_details:
         for s in stock_details:
-            # 第一排：顯示股票名稱與備註
             st.markdown(f"#### 🏷️ **{s['ticker']}** ({s['market']})")
             if pd.notna(s['note']) and str(s['note']).strip() != "":
                 st.caption(f"📝 備註：{s['note']}")
                 
-            # 第二排：切分成四個欄位顯示詳細數據
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric(label="持有股數", value=f"{s['shares']:.0f} 股")
@@ -202,19 +197,17 @@ with tab_stock:
             with col3:
                 st.metric(label="損益平衡價", value=f"${s['break_even']:,.2f}")
             with col4:
-                # delta 會自動根據正負值顯示紅綠色 (Streamlit 預設綠升紅降)
                 st.metric(
                     label="目前淨損益", 
                     value=f"${s['profit']:,.0f}", 
                     delta=f"{s['profit_pct']:.2f}%"
                 )
-            st.divider() # 畫一條分隔線區隔不同股票
+            st.divider() 
     else:
         st.write("目前尚無持股紀錄。")
         
     st.divider()
     with st.expander("➕ 新增買進紀錄"):
-        # ... (這裡保留你原本的新增表單程式碼不變) ...
         col1, col2 = st.columns(2)
         with col1:
             s_market = st.selectbox("市場", ["台灣股市", "美國股市"])
@@ -258,7 +251,6 @@ with tab_expense:
             st.rerun()
             
     if not df_expenses.empty:
-        # 將金額轉為數值型態以供繪圖
         df_expenses['金額'] = pd.to_numeric(df_expenses['金額'])
         expense_trend = df_expenses.groupby('日期')['金額'].sum().reset_index()
         fig_exp = px.line(expense_trend, x='日期', y='金額', title="每日支出趨勢", markers=True)
@@ -266,13 +258,3 @@ with tab_expense:
         
         with st.expander("查看原始數據"):
             st.dataframe(df_expenses, use_container_width=True)
-
-# 確保空表單時擁有正確的欄位 (新增 '備註')
-if df_banks.empty: 
-    df_banks = pd.DataFrame(columns=['銀行名稱', '餘額', '更新日期', '備註'])
-elif '備註' not in df_banks.columns:
-    # 確保舊有的資料表即使沒有備註欄位也不會報錯
-    df_banks['備註'] = ""
-
-if df_stocks.empty: df_stocks = pd.DataFrame(columns=['市場', '代號', '股數', '平均成本'])
-if df_expenses.empty: df_expenses = pd.DataFrame(columns=['日期', '類別', '項目', '金額'])
