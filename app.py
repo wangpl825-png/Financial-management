@@ -61,51 +61,69 @@ if not df_stocks.empty:
         note = row.get('備註', '') 
         current_price = 0
         
-        # --- 2. 抓取即時報價 (雙重防護機制：偽裝瀏覽器 + FinMind 備用) ---
+# --- 2. 終極診斷版：直接呼叫 API 並在網頁顯示錯誤 ---
+        current_price = cost # 預設為成本價
+        fetch_success = False
+        debug_logs = [] # 用來收集到底哪裡出錯的清單
+        
         try:
-            fetch_success = False
-            
-            # 策略 A：偽裝成正常瀏覽器，避免被 Yahoo Finance 擋下 (解決 403 錯誤)
-            session = requests.Session()
-            session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
-            
             yf_tickers_to_try = [ticker]
             if market == "台灣股市" and not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
                 yf_tickers_to_try = [f"{ticker}.TW", f"{ticker}.TWO"]
 
+            # 策略 A：跳過 yfinance 套件，偽裝成真實瀏覽器直接請求 JSON 資料
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'application/json'
+            }
+            
             for yf_t in yf_tickers_to_try:
-                # 把 session 傳進去給 yfinance
-                stock_info = yf.Ticker(yf_t, session=session)
-                hist = stock_info.history(period="7d") # 拉長到 7 天防連假無開盤
-                
-                if not hist.empty:
-                    current_price = float(hist['Close'].iloc[-1])
-                    fetch_success = True
-                    break 
+                try:
+                    # 使用 Yahoo query2 端點，抓取近 5 天資料
+                    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{yf_t}?interval=1d&range=5d"
+                    res = requests.get(url, headers=headers, timeout=5)
+                    
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get('chart', {}).get('result'):
+                            closes = data['chart']['result'][0]['indicators']['quote'][0]['close']
+                            valid_closes = [c for c in closes if c is not None]
+                            if valid_closes:
+                                current_price = float(valid_closes[-1])
+                                fetch_success = True
+                                break # 成功就跳出迴圈
+                    else:
+                        debug_logs.append(f"Yahoo {yf_t} 狀態碼: {res.status_code}")
+                except Exception as e:
+                    debug_logs.append(f"Yahoo {yf_t} 異常: {str(e)}")
             
-            # 策略 B：如果 Yahoo Finance 還是失敗，且是台股，自動啟動 FinMind 備用 API
+            # 策略 B：如果 Yahoo 失敗，台股啟用 FinMind 備用路線
             if not fetch_success and market == "台灣股市":
-                url = "https://api.finmindtrade.com/api/v4/data"
-                params = {
-                    "dataset": "TaiwanStockPrice", 
-                    "data_id": ticker, 
-                    "start_date": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-                }
-                res = requests.get(url, params=params, timeout=5).json()
-                if res.get('msg') == 'success' and len(res['data']) > 0:
-                    current_price = float(res['data'][-1]['close'])
-                    fetch_success = True
-            
-            # 如果 A 跟 B 都失敗了，才會退回成本價
+                try:
+                    url = "https://api.finmindtrade.com/api/v4/data"
+                    params = {
+                        "dataset": "TaiwanStockPrice", 
+                        "data_id": ticker, 
+                        "start_date": (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+                    }
+                    res = requests.get(url, params=params, timeout=5)
+                    if res.status_code == 200:
+                        data = res.json()
+                        if data.get('msg') == 'success' and len(data['data']) > 0:
+                            current_price = float(data['data'][-1]['close'])
+                            fetch_success = True
+                    else:
+                        debug_logs.append(f"FinMind 狀態碼: {res.status_code}")
+                except Exception as e:
+                    debug_logs.append(f"FinMind 異常: {str(e)}")
+
+            # 如果全失敗，把錯誤訊息直接印在網頁上！
             if not fetch_success:
-                current_price = cost 
-                st.toast(f"⚠️ {ticker} 報價抓取失敗，請確認代號是否正確。")
+                st.warning(f"⚠️ {ticker} 報價抓取失敗！原因：{', '.join(debug_logs)}")
                 
         except Exception as e:
-            current_price = cost
-            print(f"抓取 {ticker} 發生異常: {e}")
-            st.toast(f"⚠️ 讀取 {ticker} 發生連線異常。")
-                
+            st.error(f"❌ 處理 {ticker} 時發生嚴重錯誤: {str(e)}")
+            
         # --- 3. 計算成本、手續費、稅金與損益 ---
         if market == "台灣股市":
             fee_rate = 0.001425 * 0.28 # 台股手續費 2.8 折
