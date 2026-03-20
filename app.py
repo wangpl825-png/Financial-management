@@ -61,28 +61,45 @@ if not df_stocks.empty:
         note = row.get('備註', '') 
         current_price = 0
         
-        # --- 2. 統一使用 yfinance 抓取即時報價 ---
+        # --- 2. 抓取即時報價 (雙重防護機制：偽裝瀏覽器 + FinMind 備用) ---
         try:
-            yf_tickers_to_try = [ticker]
+            fetch_success = False
             
-            # 如果是台灣股市，且沒有手動指定後綴，則同時準備上市 (.TW) 與上櫃 (.TWO) 的代號
+            # 策略 A：偽裝成正常瀏覽器，避免被 Yahoo Finance 擋下 (解決 403 錯誤)
+            session = requests.Session()
+            session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+            
+            yf_tickers_to_try = [ticker]
             if market == "台灣股市" and not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
                 yf_tickers_to_try = [f"{ticker}.TW", f"{ticker}.TWO"]
 
-            fetch_success = False
             for yf_t in yf_tickers_to_try:
-                # 抓取近 5 天資料確保能避開假日
-                stock_info = yf.Ticker(yf_t)
-                hist = stock_info.history(period="5d")
+                # 把 session 傳進去給 yfinance
+                stock_info = yf.Ticker(yf_t, session=session)
+                hist = stock_info.history(period="7d") # 拉長到 7 天防連假無開盤
                 
                 if not hist.empty:
                     current_price = float(hist['Close'].iloc[-1])
                     fetch_success = True
-                    break # 成功抓到資料就跳出迴圈
+                    break 
             
+            # 策略 B：如果 Yahoo Finance 還是失敗，且是台股，自動啟動 FinMind 備用 API
+            if not fetch_success and market == "台灣股市":
+                url = "https://api.finmindtrade.com/api/v4/data"
+                params = {
+                    "dataset": "TaiwanStockPrice", 
+                    "data_id": ticker, 
+                    "start_date": (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+                }
+                res = requests.get(url, params=params, timeout=5).json()
+                if res.get('msg') == 'success' and len(res['data']) > 0:
+                    current_price = float(res['data'][-1]['close'])
+                    fetch_success = True
+            
+            # 如果 A 跟 B 都失敗了，才會退回成本價
             if not fetch_success:
                 current_price = cost 
-                st.toast(f"⚠️ 找不到 {ticker} 的報價，暫以成本計算。若是台股，請確認代號是否為上市櫃股票。")
+                st.toast(f"⚠️ {ticker} 報價抓取失敗，請確認代號是否正確。")
                 
         except Exception as e:
             current_price = cost
