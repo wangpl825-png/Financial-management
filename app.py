@@ -56,6 +56,12 @@ if not df_stocks.empty:
         else:
             ticker = raw_ticker
             
+        # --- 【全新防呆】：把被 Google Sheets 吃掉的 "00" 自動補回來 ---
+        if market == "台灣股市" and ticker.isdigit():
+            # 如果是 0050 (長度剩2) 或 00878 (長度剩3)，程式自動補上 "00"
+            if len(ticker) == 2 or len(ticker) == 3:
+                ticker = "00" + ticker
+                
         shares = float(row['股數'])
         cost = float(row['平均成本'])
         note = row.get('備註', '') 
