@@ -80,7 +80,7 @@ if not df_stocks.empty:
             'current_price': current_price, 'current_value': current_value, 
             'profit': profit, 'profit_pct': profit_pct,
             'note': note  # 將備註存入清單中
-        }))
+        })
 
 # --- 3. 介面與分頁設計 ---
 st.title("📊 財富管理儀表板")
