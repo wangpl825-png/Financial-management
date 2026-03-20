@@ -80,16 +80,41 @@ if not df_stocks.empty:
             print(f"讀取 {ticker} 發生錯誤: {e}")
             current_price = cost
                 
-        # --- 3. 計算現值與損益 ---
-        current_value = current_price * shares
-        total_stock_value += current_value
-        profit = (current_price - cost) * shares
-        profit_pct = ((current_price - cost) / cost) * 100 if cost > 0 else 0
+        # --- 3. 計算成本、手續費、稅金與損益 ---
+        # 依據市場設定不同的費率
+        if market == "台灣股市":
+            fee_rate = 0.001425 * 0.28
+            tax_rate = 0.003
+        else:
+            # 假設美股海外券商免手續費與交易稅 (若為複委託可在此修改)
+            fee_rate = 0.0
+            tax_rate = 0.0
+            
+        # 買入成本與手續費
+        buy_fee = cost * shares * fee_rate
+        total_cost = cost * shares + buy_fee
+        
+        # 假設以目前市價賣出會產生的手續費與稅金
+        sell_fee = current_price * shares * fee_rate
+        sell_tax = current_price * shares * tax_rate
+        
+        # 實際現值 (已扣除預估賣出成本)
+        current_value = (current_price * shares) - sell_fee - sell_tax
+        total_stock_value += current_value 
+        
+        # 計算淨損益 (絕對值與比例)
+        profit = current_value - total_cost
+        profit_pct = (profit / total_cost) * 100 if total_cost > 0 else 0
+        
+        # 精算損益平衡價 (賣出淨額 = 總買入成本)
+        net_sell_ratio = 1 - fee_rate - tax_rate
+        break_even_price = total_cost / (shares * net_sell_ratio) if shares > 0 and net_sell_ratio > 0 else cost
         
         stock_details.append({
             'ticker': ticker, 'market': market, 'shares': shares, 
             'current_price': current_price, 'current_value': current_value, 
             'profit': profit, 'profit_pct': profit_pct,
+            'break_even': break_even_price,
             'note': note
         })
 
@@ -160,24 +185,37 @@ with tab_stock:
     st.subheader("庫存持股狀況")
     if stock_details:
         for s in stock_details:
-            st.metric(
-                label=f"{s['ticker']} ({s['market']}) - 共 {s['shares']:.0f} 股", 
-                value=f"現值: ${s['current_value']:,.0f}", 
-                delta=f"損益: ${s['profit']:,.0f} ({s['profit_pct']:.2f}%)"
-            )
-            # 顯示備註 (如果有填寫的話)
+            # 第一排：顯示股票名稱與備註
+            st.markdown(f"#### 🏷️ **{s['ticker']}** ({s['market']})")
             if pd.notna(s['note']) and str(s['note']).strip() != "":
                 st.caption(f"📝 備註：{s['note']}")
+                
+            # 第二排：切分成四個欄位顯示詳細數據
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric(label="持有股數", value=f"{s['shares']:.0f} 股")
+            with col2:
+                st.metric(label="及時股價", value=f"${s['current_price']:,.2f}")
+            with col3:
+                st.metric(label="損益平衡價", value=f"${s['break_even']:,.2f}")
+            with col4:
+                # delta 會自動根據正負值顯示紅綠色 (Streamlit 預設綠升紅降)
+                st.metric(
+                    label="目前淨損益", 
+                    value=f"${s['profit']:,.0f}", 
+                    delta=f"{s['profit_pct']:.2f}%"
+                )
+            st.divider() # 畫一條分隔線區隔不同股票
     else:
         st.write("目前尚無持股紀錄。")
         
     st.divider()
     with st.expander("➕ 新增買進紀錄"):
+        # ... (這裡保留你原本的新增表單程式碼不變) ...
         col1, col2 = st.columns(2)
         with col1:
             s_market = st.selectbox("市場", ["台灣股市", "美國股市"])
             s_ticker = st.text_input("股票代號 (台股如 2330，美股如 AAPL)")
-            # 新增備註輸入框
             s_note = st.text_input("備註 (選填，例如：長期存股、短線)") 
         with col2:
             s_shares = st.number_input("買進股數", min_value=1, step=1)
@@ -189,7 +227,7 @@ with tab_stock:
                 '代號': s_ticker, 
                 '股數': s_shares, 
                 '平均成本': s_cost, 
-                '備註': s_note # 將備註寫入 DataFrame
+                '備註': s_note
             }])
             df_stocks = pd.concat([df_stocks, new_stock], ignore_index=True)
             conn.update(worksheet="Stocks", data=df_stocks)
