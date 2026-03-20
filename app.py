@@ -99,6 +99,12 @@ with tab_bank:
     if not df_banks.empty:
         for index, row in df_banks.iterrows():
             st.metric(label=f"🏦 {row['銀行名稱']}", value=f"NT$ {row['餘額']:,.0f}", delta=f"更新於: {row['更新日期']}", delta_color="off")
+            
+            # 讀取並顯示備註 (如果有填寫的話)
+            note = row.get('備註', '')
+            if pd.notna(note) and str(note).strip() != "":
+                st.caption(f"📝 備註：{note}")
+                
     else:
         st.write("尚無帳戶資料。")
         
@@ -106,12 +112,21 @@ with tab_bank:
     with st.expander("➕ 新增/更新銀行帳戶"):
         new_bank = st.text_input("銀行名稱 (如：玉山銀行)")
         new_amount = st.number_input("目前餘額", min_value=0, step=1000)
+        # 新增備註輸入框
+        new_note = st.text_input("備註 (選填，例如：薪資戶、旅遊基金)")
+        
         if st.button("確認更新"):
             if new_bank in df_banks['銀行名稱'].values:
                 df_banks.loc[df_banks['銀行名稱'] == new_bank, '餘額'] = new_amount
                 df_banks.loc[df_banks['銀行名稱'] == new_bank, '更新日期'] = datetime.now().strftime("%Y-%m-%d")
+                df_banks.loc[df_banks['銀行名稱'] == new_bank, '備註'] = new_note # 更新備註
             else:
-                new_row = pd.DataFrame([{'銀行名稱': new_bank, '餘額': new_amount, '更新日期': datetime.now().strftime("%Y-%m-%d")}])
+                new_row = pd.DataFrame([{
+                    '銀行名稱': new_bank, 
+                    '餘額': new_amount, 
+                    '更新日期': datetime.now().strftime("%Y-%m-%d"),
+                    '備註': new_note # 新增備註
+                }])
                 df_banks = pd.concat([df_banks, new_row], ignore_index=True)
             
             conn.update(worksheet="Banks", data=df_banks)
@@ -177,3 +192,13 @@ with tab_expense:
         
         with st.expander("查看原始數據"):
             st.dataframe(df_expenses, use_container_width=True)
+
+# 確保空表單時擁有正確的欄位 (新增 '備註')
+if df_banks.empty: 
+    df_banks = pd.DataFrame(columns=['銀行名稱', '餘額', '更新日期', '備註'])
+elif '備註' not in df_banks.columns:
+    # 確保舊有的資料表即使沒有備註欄位也不會報錯
+    df_banks['備註'] = ""
+
+if df_stocks.empty: df_stocks = pd.DataFrame(columns=['市場', '代號', '股數', '平均成本'])
+if df_expenses.empty: df_expenses = pd.DataFrame(columns=['日期', '類別', '項目', '金額'])
