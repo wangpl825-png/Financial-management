@@ -27,8 +27,16 @@ except Exception as e:
     st.stop()
 
 # 確保空表單時擁有正確的欄位
-if df_banks.empty: df_banks = pd.DataFrame(columns=['銀行名稱', '餘額', '更新日期'])
-if df_stocks.empty: df_stocks = pd.DataFrame(columns=['市場', '代號', '股數', '平均成本'])
+if df_banks.empty: 
+    df_banks = pd.DataFrame(columns=['銀行名稱', '餘額', '更新日期', '備註'])
+elif '備註' not in df_banks.columns:
+    df_banks['備註'] = ""
+
+if df_stocks.empty: 
+    df_stocks = pd.DataFrame(columns=['市場', '代號', '股數', '平均成本', '備註'])
+elif '備註' not in df_stocks.columns:
+    df_stocks['備註'] = ""
+
 if df_expenses.empty: df_expenses = pd.DataFrame(columns=['日期', '類別', '項目', '金額'])
 
 # --- 2. 預先計算總資產與獲取即時股價 ---
@@ -39,6 +47,8 @@ stock_details = []
 if not df_stocks.empty:
     for index, row in df_stocks.iterrows():
         market, ticker, shares, cost = row['市場'], str(row['代號']), float(row['股數']), float(row['平均成本'])
+        # 讀取備註
+        note = row.get('備註', '') 
         current_price = 0
         
         # 依照市場呼叫不同 API
@@ -68,8 +78,9 @@ if not df_stocks.empty:
         stock_details.append({
             'ticker': ticker, 'market': market, 'shares': shares, 
             'current_price': current_price, 'current_value': current_value, 
-            'profit': profit, 'profit_pct': profit_pct
-        })
+            'profit': profit, 'profit_pct': profit_pct,
+            'note': note  # 將備註存入清單中
+        }))
 
 # --- 3. 介面與分頁設計 ---
 st.title("📊 財富管理儀表板")
@@ -143,6 +154,9 @@ with tab_stock:
                 value=f"現值: ${s['current_value']:,.0f}", 
                 delta=f"損益: ${s['profit']:,.0f} ({s['profit_pct']:.2f}%)"
             )
+            # 顯示備註 (如果有填寫的話)
+            if pd.notna(s['note']) and str(s['note']).strip() != "":
+                st.caption(f"📝 備註：{s['note']}")
     else:
         st.write("目前尚無持股紀錄。")
         
@@ -152,12 +166,20 @@ with tab_stock:
         with col1:
             s_market = st.selectbox("市場", ["台灣股市", "美國股市"])
             s_ticker = st.text_input("股票代號 (台股如 2330，美股如 AAPL)")
+            # 新增備註輸入框
+            s_note = st.text_input("備註 (選填，例如：長期存股、短線)") 
         with col2:
             s_shares = st.number_input("買進股數", min_value=1, step=1)
             s_cost = st.number_input("平均買進成本", min_value=0.0, step=1.0)
             
         if st.button("新增持股"):
-            new_stock = pd.DataFrame([{'市場': s_market, '代號': s_ticker, '股數': s_shares, '平均成本': s_cost}])
+            new_stock = pd.DataFrame([{
+                '市場': s_market, 
+                '代號': s_ticker, 
+                '股數': s_shares, 
+                '平均成本': s_cost, 
+                '備註': s_note # 將備註寫入 DataFrame
+            }])
             df_stocks = pd.concat([df_stocks, new_stock], ignore_index=True)
             conn.update(worksheet="Stocks", data=df_stocks)
             st.success("已寫入 Google Sheets！")
