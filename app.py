@@ -46,30 +46,41 @@ stock_details = []
 
 if not df_stocks.empty:
     for index, row in df_stocks.iterrows():
-        market, ticker, shares, cost = row['市場'], str(row['代號']), float(row['股數']), float(row['平均成本'])
-        # 讀取備註
+        market = row['市場']
+        # 1. 加上 .strip()，把代號前後不小心多打的空白鍵刪除
+        ticker = str(row['代號']).strip() 
+        shares = float(row['股數'])
+        cost = float(row['平均成本'])
         note = row.get('備註', '') 
         current_price = 0
         
-        # 依照市場呼叫不同 API
-        if market == "台灣股市":
-            try:
-                url = "https://api.finmindtrade.com/api/v4/data"
-                # 抓取近 5 天資料以防遇到假日無開盤
-                params = {"dataset": "TaiwanStockPrice", "data_id": ticker, "start_date": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")}
-                res = requests.get(url, params=params).json()
-                if res.get('msg') == 'success' and len(res['data']) > 0:
-                    current_price = res['data'][-1]['close']
-            except:
-                current_price = cost # 若失敗暫以成本計
-        else:
-            try:
-                stock_info = yf.Ticker(ticker)
-                current_price = stock_info.history(period="1d")['Close'].iloc[-1]
-            except:
-                current_price = cost
+        # --- 2. 統一使用 yfinance 抓取即時報價 ---
+        try:
+            # 設定 yfinance 專用的代號
+            yf_ticker = ticker
+            if market == "台灣股市":
+                # 如果是台股，且使用者沒有手動加 .TW 或 .TWO，我們程式自動補上
+                if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
+                    yf_ticker = f"{ticker}.TW"
+            
+            # 呼叫 yfinance
+            stock_info = yf.Ticker(yf_ticker)
+            # 抓取近 5 天的歷史資料 (避免卡到週末或國定假日沒開盤)
+            hist = stock_info.history(period="5d")
+            
+            if not hist.empty:
+                # 取得最後一個交易日的收盤價
+                current_price = hist['Close'].iloc[-1]
+            else:
+                # 真的完全沒資料才退回成本價
+                current_price = cost 
                 
-        # 計算現值與損益
+        except Exception as e:
+            # 發生任何錯誤時退回成本價，並在終端機印出錯誤方便後續除錯
+            print(f"讀取 {ticker} 發生錯誤: {e}")
+            current_price = cost
+                
+        # --- 3. 計算現值與損益 ---
         current_value = current_price * shares
         total_stock_value += current_value
         profit = (current_price - cost) * shares
@@ -79,7 +90,7 @@ if not df_stocks.empty:
             'ticker': ticker, 'market': market, 'shares': shares, 
             'current_price': current_price, 'current_value': current_value, 
             'profit': profit, 'profit_pct': profit_pct,
-            'note': note  # 將備註存入清單中
+            'note': note
         })
 
 # --- 3. 介面與分頁設計 ---
