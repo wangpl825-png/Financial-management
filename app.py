@@ -4,96 +4,153 @@ import yfinance as yf
 import requests
 import plotly.express as px
 from datetime import datetime, timedelta
+from streamlit_gsheets import GSheetsConnection
 
 # --- 網頁基本設定 ---
 st.set_page_config(page_title="個人財富管理儀表板", page_icon="💰", layout="centered")
 
-# --- 初始化暫存資料 (代替資料庫) ---
-if 'expenses' not in st.session_state:
-    st.session_state.expenses = pd.DataFrame(columns=['日期', '類別', '項目', '金額'])
-if 'banks' not in st.session_state:
-    st.session_state.banks = {'玉山銀行': 50000, '元大銀行': 30000}
+# --- 1. 連線至 Google Sheets 資料庫 ---
+# 使用 st.cache_resource 避免每次操作都重新建立連線
+@st.cache_resource
+def get_connection():
+    return st.connection("gsheets", type=GSheetsConnection)
 
-# --- 標題與分頁設計 ---
+conn = get_connection()
+
+# 讀取資料 (ttl=0 代表不快取，確保抓到最新資料)
+try:
+    df_banks = conn.read(worksheet="Banks", ttl=0)
+    df_stocks = conn.read(worksheet="Stocks", ttl=0)
+    df_expenses = conn.read(worksheet="Expenses", ttl=0)
+except Exception as e:
+    st.error(f"讀取資料庫失敗，請確認 Google Sheets 設定與 Secrets 是否正確。錯誤訊息: {e}")
+    st.stop()
+
+# 確保空表單時擁有正確的欄位
+if df_banks.empty: df_banks = pd.DataFrame(columns=['銀行名稱', '餘額', '更新日期'])
+if df_stocks.empty: df_stocks = pd.DataFrame(columns=['市場', '代號', '股數', '平均成本'])
+if df_expenses.empty: df_expenses = pd.DataFrame(columns=['日期', '類別', '項目', '金額'])
+
+# --- 2. 預先計算總資產與獲取即時股價 ---
+total_bank = df_banks['餘額'].sum() if not df_banks.empty else 0
+total_stock_value = 0
+stock_details = []
+
+if not df_stocks.empty:
+    for index, row in df_stocks.iterrows():
+        market, ticker, shares, cost = row['市場'], str(row['代號']), float(row['股數']), float(row['平均成本'])
+        current_price = 0
+        
+        # 依照市場呼叫不同 API
+        if market == "台灣股市":
+            try:
+                url = "https://api.finmindtrade.com/api/v4/data"
+                # 抓取近 5 天資料以防遇到假日無開盤
+                params = {"dataset": "TaiwanStockPrice", "data_id": ticker, "start_date": (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")}
+                res = requests.get(url, params=params).json()
+                if res.get('msg') == 'success' and len(res['data']) > 0:
+                    current_price = res['data'][-1]['close']
+            except:
+                current_price = cost # 若失敗暫以成本計
+        else:
+            try:
+                stock_info = yf.Ticker(ticker)
+                current_price = stock_info.history(period="1d")['Close'].iloc[-1]
+            except:
+                current_price = cost
+                
+        # 計算現值與損益
+        current_value = current_price * shares
+        total_stock_value += current_value
+        profit = (current_price - cost) * shares
+        profit_pct = ((current_price - cost) / cost) * 100 if cost > 0 else 0
+        
+        stock_details.append({
+            'ticker': ticker, 'market': market, 'shares': shares, 
+            'current_price': current_price, 'current_value': current_value, 
+            'profit': profit, 'profit_pct': profit_pct
+        })
+
+# --- 3. 介面與分頁設計 ---
 st.title("📊 財富管理儀表板")
 tab_home, tab_bank, tab_stock, tab_expense = st.tabs(["🏠 首頁", "🏦 銀行存款", "📈 股票投資", "💸 支出追蹤"])
 
-# --- 1. 首頁：總資產概況 ---
+# --- 首頁：總資產概況 ---
 with tab_home:
     st.subheader("資產分布概況")
-    # 簡單加總銀行存款作為範例
-    total_bank = sum(st.session_state.banks.values())
+    total_assets = total_bank + total_stock_value
     
-    # 繪製圓餅圖
-    fig = px.pie(
-        values=[total_bank, 150000, 20000], # 假設股票15萬，現金2萬
-        names=['銀行存款', '股票投資', '手邊現金'],
-        title="目前資產分布",
-        hole=0.4
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    st.metric(label="預估總資產 (TWD)", value=f"NT$ {total_assets:,.0f}")
     
-    st.metric(label="預估總資產", value=f"NT$ {total_bank + 150000 + 20000:,}")
+    if total_assets > 0:
+        fig = px.pie(
+            values=[total_bank, total_stock_value], 
+            names=['銀行存款', '股票投資'],
+            hole=0.4,
+            color_discrete_sequence=px.colors.sequential.Teal
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("目前尚無資產資料，請至其他分頁新增。")
 
-# --- 2. 銀行存款 ---
+# --- 銀行存款 ---
 with tab_bank:
-    st.subheader("銀行帳戶管理")
-    for bank, amount in st.session_state.banks.items():
-        st.metric(label=bank, value=f"NT$ {amount:,}")
-    
+    st.subheader("帳戶餘額管理")
+    if not df_banks.empty:
+        for index, row in df_banks.iterrows():
+            st.metric(label=f"🏦 {row['銀行名稱']}", value=f"NT$ {row['餘額']:,.0f}", delta=f"更新於: {row['更新日期']}", delta_color="off")
+    else:
+        st.write("尚無帳戶資料。")
+        
     st.divider()
     with st.expander("➕ 新增/更新銀行帳戶"):
-        new_bank = st.text_input("銀行名稱 (如：國泰世華)")
+        new_bank = st.text_input("銀行名稱 (如：玉山銀行)")
         new_amount = st.number_input("目前餘額", min_value=0, step=1000)
-        if st.button("更新帳戶"):
-            st.session_state.banks[new_bank] = new_amount
-            st.success(f"已更新 {new_bank} 餘額為 {new_amount}")
+        if st.button("確認更新"):
+            if new_bank in df_banks['銀行名稱'].values:
+                df_banks.loc[df_banks['銀行名稱'] == new_bank, '餘額'] = new_amount
+                df_banks.loc[df_banks['銀行名稱'] == new_bank, '更新日期'] = datetime.now().strftime("%Y-%m-%d")
+            else:
+                new_row = pd.DataFrame([{'銀行名稱': new_bank, '餘額': new_amount, '更新日期': datetime.now().strftime("%Y-%m-%d")}])
+                df_banks = pd.concat([df_banks, new_row], ignore_index=True)
+            
+            conn.update(worksheet="Banks", data=df_banks)
+            st.success("更新成功！")
             st.rerun()
 
-# --- 3. 股票投資 (API 串接) ---
+# --- 股票投資 ---
 with tab_stock:
-    st.subheader("即時股價追蹤")
-    stock_type = st.radio("選擇市場", ["台灣股市", "美國股市"], horizontal=True)
-    
-    if stock_type == "台灣股市":
-        tw_ticker = st.text_input("輸入台股代號", value="2330")
-        if st.button("查詢台股"):
-            try:
-                # 透過 FinMind API 抓取台股資料
-                url = "https://api.finmindtrade.com/api/v4/data"
-                parameter = {
-                    "dataset": "TaiwanStockPrice",
-                    "data_id": tw_ticker,
-                    "start_date": (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-                }
-                res = requests.get(url, params=parameter)
-                data = res.json()
-                if data['msg'] == 'success' and len(data['data']) > 0:
-                    df_tw = pd.DataFrame(data['data'])
-                    fig_tw = px.line(df_tw, x='date', y='close', title=f"{tw_ticker} 近一個月收盤價趨勢")
-                    st.plotly_chart(fig_tw, use_container_width=True)
-                    st.metric(label="最新收盤價", value=df_tw['close'].iloc[-1])
-                else:
-                    st.warning("查無資料或達到 API 限制。")
-            except Exception as e:
-                st.error(f"獲取資料失敗: {e}")
-                
+    st.subheader("庫存持股狀況")
+    if stock_details:
+        for s in stock_details:
+            st.metric(
+                label=f"{s['ticker']} ({s['market']}) - 共 {s['shares']:.0f} 股", 
+                value=f"現值: ${s['current_value']:,.0f}", 
+                delta=f"損益: ${s['profit']:,.0f} ({s['profit_pct']:.2f}%)"
+            )
     else:
-        us_ticker = st.text_input("輸入美股代號", value="AAPL")
-        if st.button("查詢美股"):
-            try:
-                # 透過 yfinance 抓取美股資料
-                stock = yf.Ticker(us_ticker)
-                hist = stock.history(period="1mo")
-                fig_us = px.line(hist, x=hist.index, y='Close', title=f"{us_ticker} 近一個月收盤價趨勢")
-                st.plotly_chart(fig_us, use_container_width=True)
-                st.metric(label="最新收盤價 (USD)", value=round(hist['Close'].iloc[-1], 2))
-            except Exception as e:
-                st.error("查無此代號或網路錯誤")
+        st.write("目前尚無持股紀錄。")
+        
+    st.divider()
+    with st.expander("➕ 新增買進紀錄"):
+        col1, col2 = st.columns(2)
+        with col1:
+            s_market = st.selectbox("市場", ["台灣股市", "美國股市"])
+            s_ticker = st.text_input("股票代號 (台股如 2330，美股如 AAPL)")
+        with col2:
+            s_shares = st.number_input("買進股數", min_value=1, step=1)
+            s_cost = st.number_input("平均買進成本", min_value=0.0, step=1.0)
+            
+        if st.button("新增持股"):
+            new_stock = pd.DataFrame([{'市場': s_market, '代號': s_ticker, '股數': s_shares, '平均成本': s_cost}])
+            df_stocks = pd.concat([df_stocks, new_stock], ignore_index=True)
+            conn.update(worksheet="Stocks", data=df_stocks)
+            st.success("已寫入 Google Sheets！")
+            st.rerun()
 
-# --- 4. 支出追蹤 ---
+# --- 支出追蹤 ---
 with tab_expense:
-    st.subheader("本月支出紀錄")
+    st.subheader("支出紀錄與趨勢")
     
     with st.form("expense_form"):
         col1, col2 = st.columns(2)
@@ -104,15 +161,19 @@ with tab_expense:
             e_name = st.text_input("項目說明")
             e_amount = st.number_input("金額", min_value=0, step=10)
             
-        submitted = st.form_submit_button("新增一筆支出")
-        if submitted:
-            new_record = pd.DataFrame([{'日期': e_date, '類別': e_cat, '項目': e_name, '金額': e_amount}])
-            st.session_state.expenses = pd.concat([st.session_state.expenses, new_record], ignore_index=True)
-            st.success("新增成功！")
+        if st.form_submit_button("新增一筆支出"):
+            new_record = pd.DataFrame([{'日期': e_date.strftime("%Y-%m-%d"), '類別': e_cat, '項目': e_name, '金額': e_amount}])
+            df_expenses = pd.concat([df_expenses, new_record], ignore_index=True)
+            conn.update(worksheet="Expenses", data=df_expenses)
+            st.success("支出已記錄！")
+            st.rerun()
             
-    if not st.session_state.expenses.empty:
-        st.dataframe(st.session_state.expenses, use_container_width=True)
-        # 支出趨勢圖
-        expense_trend = st.session_state.expenses.groupby('日期')['金額'].sum().reset_index()
+    if not df_expenses.empty:
+        # 將金額轉為數值型態以供繪圖
+        df_expenses['金額'] = pd.to_numeric(df_expenses['金額'])
+        expense_trend = df_expenses.groupby('日期')['金額'].sum().reset_index()
         fig_exp = px.line(expense_trend, x='日期', y='金額', title="每日支出趨勢", markers=True)
         st.plotly_chart(fig_exp, use_container_width=True)
+        
+        with st.expander("查看原始數據"):
+            st.dataframe(df_expenses, use_container_width=True)
