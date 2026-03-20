@@ -56,29 +56,32 @@ if not df_stocks.empty:
         
         # --- 2. 統一使用 yfinance 抓取即時報價 ---
         try:
-            # 設定 yfinance 專用的代號
-            yf_ticker = ticker
-            if market == "台灣股市":
-                # 如果是台股，且使用者沒有手動加 .TW 或 .TWO，我們程式自動補上
-                if not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
-                    yf_ticker = f"{ticker}.TW"
+            yf_tickers_to_try = [ticker]
             
-            # 呼叫 yfinance
-            stock_info = yf.Ticker(yf_ticker)
-            # 抓取近 5 天的歷史資料 (避免卡到週末或國定假日沒開盤)
-            hist = stock_info.history(period="5d")
+            # 如果是台灣股市，且沒有手動指定後綴，則同時準備上市 (.TW) 與上櫃 (.TWO) 的代號
+            if market == "台灣股市" and not (ticker.endswith(".TW") or ticker.endswith(".TWO")):
+                yf_tickers_to_try = [f"{ticker}.TW", f"{ticker}.TWO"]
+
+            fetch_success = False
+            for yf_t in yf_tickers_to_try:
+                # 為了避免 yfinance 殘留快取，加入 headers 模擬正常瀏覽器請求 (非必須但能提高成功率)
+                stock_info = yf.Ticker(yf_t)
+                hist = stock_info.history(period="5d")
+                
+                if not hist.empty:
+                    # 確保抓下來的是純數字 (float)
+                    current_price = float(hist['Close'].iloc[-1])
+                    fetch_success = True
+                    break # 成功抓到資料就跳出迴圈，不再嘗試下一個後綴
             
-            if not hist.empty:
-                # 取得最後一個交易日的收盤價
-                current_price = hist['Close'].iloc[-1]
-            else:
-                # 真的完全沒資料才退回成本價
+            if not fetch_success:
                 current_price = cost 
+                st.toast(f"⚠️ 找不到 {ticker} 的報價，暫以成本計算。若是台股，請確認代號是否正確。")
                 
         except Exception as e:
-            # 發生任何錯誤時退回成本價，並在終端機印出錯誤方便後續除錯
-            print(f"讀取 {ticker} 發生錯誤: {e}")
             current_price = cost
+            print(f"抓取 {ticker} 發生異常: {e}")
+            st.toast(f"⚠️ 讀取 {ticker} 發生連線異常。")
                 
         # --- 3. 計算成本、手續費、稅金與損益 ---
         # 依據市場設定不同的費率
